@@ -6,6 +6,9 @@
 #   ./scripts/deploy.sh --web    # 只构建 Java+Vue web
 set -euo pipefail
 
+# 确保从项目根目录运行，否则 rsync ./ --delete 会同步错误目录
+[[ -f Dockerfile-server ]] || { echo "错误：请在项目根目录运行此脚本"; exit 1; }
+
 REMOTE="pve-ubuntu"
 REMOTE_DIR="~/xiaozhi-esp32-server"
 SERVER_IMAGE="ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:server_latest"
@@ -37,15 +40,15 @@ rsync -avz --delete \
 
 echo "==> 远程构建镜像..."
 ssh "$REMOTE" bash -s << ENDSSH
-  set -e
+  set -euo pipefail
   cd $REMOTE_DIR
 
-  if $BUILD_SERVER; then
+  if [[ "$BUILD_SERVER" == "true" ]]; then
     echo "-- 构建 server 镜像..."
     docker build -t $SERVER_IMAGE -f Dockerfile-server .
   fi
 
-  if $BUILD_WEB; then
+  if [[ "$BUILD_WEB" == "true" ]]; then
     echo "-- 构建 web 镜像..."
     docker build -t $WEB_IMAGE -f Dockerfile-web .
   fi
@@ -54,7 +57,7 @@ ssh "$REMOTE" bash -s << ENDSSH
   docker compose -f main/xiaozhi-server/docker-compose_all.yml -f docker-compose.override.yml up -d
 
   echo "-- 当前容器状态："
-  docker compose -f main/xiaozhi-server/docker-compose_all.yml ps
+  docker compose -f main/xiaozhi-server/docker-compose_all.yml -f docker-compose.override.yml ps
 ENDSSH
 
 echo ""

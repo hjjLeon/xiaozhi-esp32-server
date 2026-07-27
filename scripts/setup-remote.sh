@@ -3,6 +3,9 @@
 # 首次部署初始化：在远程服务器已手动 git clone 的前提下运行。
 set -euo pipefail
 
+# 确保从项目根目录运行，否则相对路径 LOCAL_CONFIG 无法找到
+[[ -f Dockerfile-server ]] || { echo "错误：请在项目根目录运行此脚本"; exit 1; }
+
 REMOTE="pve-ubuntu"
 REMOTE_DIR="~/xiaozhi-esp32-server"
 # 运行时数据目录与 docker-compose_all.yml 同级，volume 路径才能正确解析
