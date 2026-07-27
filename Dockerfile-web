@@ -1,29 +1,28 @@
 # 第一阶段：构建Vue前端
-FROM node:18 AS web-builder
+FROM docker.m.daocloud.io/library/node:18 AS web-builder
 WORKDIR /app
-COPY main/manager-web/package*.json ./
-RUN npm install
 COPY main/manager-web .
 RUN npm run build
 
 # 第二阶段：构建Java后端
-FROM maven:3.9.4-eclipse-temurin-21 AS api-builder
+FROM docker.m.daocloud.io/library/maven:3.9.4-eclipse-temurin-21 AS api-builder
 WORKDIR /app
 COPY main/manager-api/pom.xml .
 COPY main/manager-api/src ./src
 RUN mvn clean package -Dmaven.test.skip=true
 
 # 第三阶段：构建最终镜像
-FROM bellsoft/liberica-runtime-container:jre-21-glibc
+FROM docker.m.daocloud.io/library/eclipse-temurin:21-jre-jammy
 
-# 安装Nginx和字体库
-RUN apk update && \
-    apk add --no-cache --no-scripts \
+# 安装Nginx和字体库（换Aliyun镜像 + 绕过本地代理）
+RUN find /etc/apt -name "*.sources" -exec sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g; s|http://security.ubuntu.com|https://mirrors.aliyun.com|g' {} \; 2>/dev/null; \
+    sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g; s|http://security.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null; \
+    apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false update && \
+    apt-get -o Acquire::http::Proxy=false -o Acquire::https::Proxy=false install -y --no-install-recommends \
         nginx \
-        bash \
         fontconfig \
-        ttf-dejavu \
-    && rm -rf /var/cache/apk/* \
+        fonts-dejavu \
+    && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/nginx /var/log/nginx /var/tmp/nginx /etc/nginx/conf.d
 
 # 复制项目自带的中文字体

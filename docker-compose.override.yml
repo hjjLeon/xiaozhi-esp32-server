@@ -1,5 +1,11 @@
 # docker-compose.override.yml
-# 覆盖 docker-compose_all.yml 中未固定的镜像版本
+# 覆盖 docker-compose_all.yml 中未固定的镜像版本，并使用国内镜像源
 services:
   xiaozhi-esp32-server-db:
-    image: mysql:8.4
+    image: docker.m.daocloud.io/library/mysql:8.4
+  xiaozhi-esp32-server-redis:
+    image: docker.m.daocloud.io/library/redis:8.0
+  xiaozhi-esp32-server:
+    volumes:
+      - ./models/snakers4_silero-vad:/opt/xiaozhi-esp32-server/models/snakers4_silero-vad
+      - ./models/SenseVoiceSmall:/opt/xiaozhi-esp32-server/models/SenseVoiceSmall
