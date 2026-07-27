@@ -5,3 +5,7 @@ __pycache__
 Dockerfile
 tmp/
 data/
+models/
+mysql/
+uploadfile/
+node_modules/

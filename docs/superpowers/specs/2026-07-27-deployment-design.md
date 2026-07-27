@@ -123,7 +123,11 @@ mkdir -p data models/SenseVoiceSmall mysql uploadfile
 ./scripts/sync-down.sh
 ```
 
-使用与 deploy.sh 相同的排除规则，运行时数据（data/、models/ 等）不会污染本地。
+排除规则与 deploy.sh 相同，运行时数据（data/、models/ 等）不会污染本地。
+
+**重要**：sync-down.sh **不使用 `--delete`**。反向拉取只补差异，不删除本地已有而远程没有的文件（比如本地新建但尚未 deploy 的文件）。两端都改了同一文件时，sync-down 会覆盖本地版本，操作前应确认本地无未 deploy 的改动。
+
+**关于远程 git 仓库**：首次 clone 仅用于节省 frp 流量，此后不在远程执行任何 git 操作。rsync 覆盖工作树后，远程 `git status` 会显示大量修改——这是预期状态，忽略即可。
 
 ---
 
@@ -135,7 +139,7 @@ mkdir -p data models/SenseVoiceSmall mysql uploadfile
 |------|-----------|---------|
 | Python Server | `Dockerfile-server` | `ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:server_latest` |
 | Java+Vue Web | `Dockerfile-web` | `ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest` |
-| MySQL | 官方镜像，无需构建 | `mysql:latest` |
+| MySQL | 官方镜像，无需构建 | `mysql:8.4`（通过 override 固定版本） |
 | Redis | 官方镜像，无需构建 | `redis:8.0` |
 
 ---
@@ -146,7 +150,9 @@ mkdir -p data models/SenseVoiceSmall mysql uploadfile
 |------|------|------|
 | `scripts/setup-remote.sh` | 新建 | 首次初始化 |
 | `scripts/deploy.sh` | 新建 | 推送源码 + 构建 + 重启 |
-| `scripts/sync-down.sh` | 新建 | 从远程拉回改动 |
+| `scripts/sync-down.sh` | 新建 | 从远程拉回改动（无 --delete） |
+| `docker-compose.override.yml` | 新建 | 固定 MySQL 版本至 8.4 |
+| `.dockerignore` | 修改 | 补充 models/ mysql/ uploadfile/ node_modules/ |
 | `docker-compose_all.yml` | 不改动 | 原样复用 |
 | `Dockerfile-server` | 不改动 | 原样复用 |
 | `Dockerfile-web` | 不改动 | 原样复用 |
