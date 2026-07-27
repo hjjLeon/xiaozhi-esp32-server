@@ -26,12 +26,16 @@ for arg in "$@"; do
 done
 
 echo "==> rsync 源码到远程（只传变化文件）..."
-rsync -avz --delete \
+rsync -avz --delete --temp-dir=/tmp \
   --exclude='.git/' \
   --exclude='__pycache__/' \
   --exclude='*.pyc' \
   --exclude='*.pyo' \
-  --exclude='node_modules/' \
+  --exclude='main/manager-web/node_modules/' \
+  --exclude='main/manager-api/node_modules/' \
+  --exclude='main/manager-mobile/node_modules/' \
+  --exclude='main/digital-human/node_modules/' \
+  --exclude='main/xiaozhi-server/node_modules/' \
   --exclude='data/' \
   --exclude='models/' \
   --exclude='mysql/' \
@@ -50,14 +54,14 @@ ssh "$REMOTE" bash -s << ENDSSH
 
   if [[ "$BUILD_WEB" == "true" ]]; then
     echo "-- 构建 web 镜像..."
-    docker build -t $WEB_IMAGE -f Dockerfile-web .
+    docker build --network=host -t $WEB_IMAGE -f Dockerfile-web .
   fi
 
   echo "-- 启动/更新容器..."
-  docker compose -f main/xiaozhi-server/docker-compose_all.yml -f docker-compose.override.yml up -d
+  docker-compose -f main/xiaozhi-server/docker-compose_all.yml -f docker-compose.override.yml up -d
 
   echo "-- 当前容器状态："
-  docker compose -f main/xiaozhi-server/docker-compose_all.yml -f docker-compose.override.yml ps
+  docker-compose -f main/xiaozhi-server/docker-compose_all.yml -f docker-compose.override.yml ps
 ENDSSH
 
 echo ""

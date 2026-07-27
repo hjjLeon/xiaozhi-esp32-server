@@ -6,6 +6,14 @@ Dockerfile
 tmp/
 data/
 models/
+main/xiaozhi-server/data/
+main/xiaozhi-server/models/
+main/xiaozhi-server/mysql/
+main/xiaozhi-server/uploadfile/
 mysql/
 uploadfile/
 node_modules/
+main/manager-api/**/node_modules/
+main/manager-mobile/**/node_modules/
+main/digital-human/**/node_modules/
+main/xiaozhi-server/**/node_modules/
