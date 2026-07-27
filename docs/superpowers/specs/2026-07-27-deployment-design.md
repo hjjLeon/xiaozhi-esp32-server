@@ -24,15 +24,19 @@ SSH 连接走按量计费的 frp，需控制流量。
 本地开发机                              远程服务器 (pve-ubuntu)
 ────────────────────                   ──────────────────────────────
  源码（当前工作目录）                    ~/xiaozhi-esp32-server/
-  │                                      ├── main/              ← 源码（rsync 同步）
-  │──── deploy.sh ──────────────────>    ├── Dockerfile-server
-  │<─── sync-down.sh ───────────────     ├── Dockerfile-web
-                                         ├── docker-compose_all.yml
-                                         ├── data/              ← 配置文件、运行数据（不同步）
-                                         ├── models/            ← 语音模型（不同步）
-                                         ├── mysql/             ← 数据库数据（不同步）
-                                         └── uploadfile/        ← 上传文件（不同步）
+  │                                      ├── main/
+  │──── deploy.sh ──────────────────>    │   └── xiaozhi-server/
+  │<─── sync-down.sh ───────────────     │       ├── docker-compose_all.yml
+                                         │       ├── data/        ← 配置文件（不同步）
+                                         │       ├── models/      ← 语音模型（不同步）
+                                         │       ├── mysql/       ← 数据库数据（不同步）
+                                         │       └── uploadfile/  ← 上传文件（不同步）
+                                         ├── Dockerfile-server    ← docker build 在此运行
+                                         ├── Dockerfile-web
+                                         └── docker-compose.override.yml
 ```
+
+> volume 路径（`./data`、`./models` 等）相对于 compose 文件所在目录（`main/xiaozhi-server/`）解析，因此运行时数据与 compose 文件同级存放。
 
 ---
 
