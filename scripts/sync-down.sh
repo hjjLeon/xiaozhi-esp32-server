@@ -7,8 +7,11 @@
 #   - 运行前请确认本地无未 deploy 的重要改动
 set -euo pipefail
 
+# 确保从项目根目录运行，否则 rsync ./ 会覆盖错误目录
+[[ -f Dockerfile-server ]] || { echo "错误：请在项目根目录运行此脚本"; exit 1; }
+
 REMOTE="pve-ubuntu"
-REMOTE_DIR="~/xiaozhi-esp32-server"
+REMOTE_DIR="~/Projects/xiaozhi-esp32-server"
 
 echo "==> 从远程同步代码到本地（不删除本地独有文件）..."
 rsync -avz \

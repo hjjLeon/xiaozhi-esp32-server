@@ -7,7 +7,7 @@ set -euo pipefail
 [[ -f Dockerfile-server ]] || { echo "错误：请在项目根目录运行此脚本"; exit 1; }
 
 REMOTE="pve-ubuntu"
-REMOTE_DIR="~/xiaozhi-esp32-server"
+REMOTE_DIR="~/Projects/xiaozhi-esp32-server"
 # 运行时数据目录与 docker-compose_all.yml 同级，volume 路径才能正确解析
 RUNTIME_BASE="$REMOTE_DIR/main/xiaozhi-server"
 LOCAL_CONFIG="main/xiaozhi-server/config_from_api.yaml"
@@ -16,7 +16,7 @@ echo "==> 检查远程目录..."
 if ! ssh "$REMOTE" "test -d $REMOTE_DIR"; then
   echo "错误：远程 $REMOTE_DIR 不存在。"
   echo "请先在服务器上执行："
-  echo "  git clone https://github.com/xinnan-tech/xiaozhi-esp32-server.git ~/xiaozhi-esp32-server"
+  echo "  git clone https://github.com/xinnan-tech/xiaozhi-esp32-server.git $REMOTE_DIR"
   exit 1
 fi
 
@@ -34,6 +34,6 @@ fi
 echo ""
 echo "==> 初始化完成。后续步骤："
 echo "    1. 下载语音模型（若尚未下载）："
-echo "       服务器上执行：wget -O ~/xiaozhi-esp32-server/main/xiaozhi-server/models/SenseVoiceSmall/model.pt <ModelScope链接>"
+echo "       服务器上执行：wget -O $RUNTIME_BASE/models/SenseVoiceSmall/model.pt <ModelScope链接>"
 echo "    2. 运行 ./scripts/deploy.sh 完成首次构建和启动"
 echo "    3. 访问 http://<server-ip>:8002 注册超级管理员"

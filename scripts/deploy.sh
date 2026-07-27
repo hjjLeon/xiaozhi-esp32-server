@@ -10,7 +10,7 @@ set -euo pipefail
 [[ -f Dockerfile-server ]] || { echo "错误：请在项目根目录运行此脚本"; exit 1; }
 
 REMOTE="pve-ubuntu"
-REMOTE_DIR="~/xiaozhi-esp32-server"
+REMOTE_DIR="~/Projects/xiaozhi-esp32-server"
 SERVER_IMAGE="ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:server_latest"
 WEB_IMAGE="ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server:web_latest"
 
