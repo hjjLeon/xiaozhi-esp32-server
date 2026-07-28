@@ -1,9 +1,35 @@
 # MCP 接入点部署使用指南
 
-本教程包含3个部分
+本教程包含4个部分
+- 0、全模块部署用户(直接看这里)
 - 1、如何部署MCP接入点这个服务
 - 2、全模块部署时，怎么配置MCP接入点
 - 3、单模块部署时，怎么配置MCP接入点
+
+# 0、全模块部署用户
+
+如果你使用的是 `docker-compose_all.yml` 全模块部署方案，**mcp-endpoint-server 已经作为内置服务包含在内，无需再按下文「第 1 部分」单独下载源码、单独启动**。
+
+启动全模块栈即可一并拉起 MCP 接入点：
+
+```bash
+cd main/xiaozhi-server
+docker compose -f docker-compose_all.yml up -d
+docker logs -f mcp-endpoint-server
+```
+
+日志里会输出两个地址(容器内 IP 例如 `172.x.x.x`)。**请将 IP 替换为你宿主机的局域网 IP**(例如 `192.168.1.25`)后再使用：
+
+```
+智控台MCP参数配置:    http://192.168.1.25:8004/mcp_endpoint/health?key=abc
+单模块部署MCP接入点:  ws://192.168.1.25:8004/mcp_endpoint/mcp/?token=def
+```
+
+拿到这两个地址后，**直接跳到「第 2 部分：全模块部署时，怎么配置 MCP 接入点」**继续。
+
+> ⚠️ **关于 key / token**:目前 mcp-endpoint-server 在容器每次首次启动时自动生成 `key` 与 `token` 并打印到日志中,**重启容器后 key / token 通常会重新生成**(上游未公开固定 key 的环境变量)。重启后,请重新查看 `docker logs mcp-endpoint-server` 的输出,把新地址再次粘贴到智控台的 `server.mcp_endpoint` 字段(全模块)或 `data/.config.yaml` 的 `mcp_endpoint`(单模块)。
+
+> 想自定义 MCP 接入点的端口、连接上限、日志等参数?在宿主机创建 `main/xiaozhi-server/data/mcp-endpoint-server/mcp-endpoint-server.cfg` 后重启容器即可,容器内置默认值为 `port=8004`。
 
 # 1、如何部署MCP接入点这个服务
 

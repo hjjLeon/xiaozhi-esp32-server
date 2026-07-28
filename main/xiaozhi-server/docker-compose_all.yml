@@ -106,5 +106,23 @@ services:
     volumes:
       # 声纹识别配置目录（包含 .voiceprint.yaml）
       - ./data/voiceprint:/app/data
+
+  # MCP接入点模块
+  mcp-endpoint-server:
+    image: ghcr.nju.edu.cn/xinnan-tech/mcp-endpoint-server:latest
+    container_name: mcp-endpoint-server
+    restart: always
+    networks:
+      - default
+    ports:
+      - "8004:8004"
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # 配置文件目录（含 mcp-endpoint-server.cfg 与运行期数据）
+      - ./data/mcp-endpoint-server:/app/data
+
 networks:
   default:
