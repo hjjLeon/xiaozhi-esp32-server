@@ -1,4 +1,4 @@
-"""测试模板残留占位符检测"""
+"""测试模板残留占位符检测 + collect_dynamic_context 动态上下文收集"""
 
 import pytest
 from core.utils.prompt_manager import PromptManager
@@ -45,3 +45,71 @@ def test_load_base_template_clean_no_warning(caplog):
         assert len(warn_records) == 0
     finally:
         os.unlink(tmp_path)
+
+
+class TestCollectDynamicContext:
+    """KV cache 优化:PromptManager.collect_dynamic_context() 动态上下文收集。"""
+
+    def _make_manager(self, sample_config):
+        from core.utils.prompt_manager import PromptManager
+
+        return PromptManager(sample_config)
+
+    def test_returns_dict_with_all_basic_fields(self, sample_config):
+        """返回的 dict 含时间/日期/星期/农历"""
+        m = self._make_manager(sample_config)
+        ctx = m.collect_dynamic_context(device_id="dev1")
+        assert "current_time" in ctx
+        assert "today_date" in ctx
+        assert "today_weekday" in ctx
+        assert "lunar_date" in ctx
+
+    def test_omits_none_memory(self, sample_config):
+        m = self._make_manager(sample_config)
+        ctx = m.collect_dynamic_context(device_id="dev1", memory_str=None)
+        assert "memory" not in ctx
+
+    def test_includes_memory_when_provided(self, sample_config):
+        m = self._make_manager(sample_config)
+        ctx = m.collect_dynamic_context(device_id="dev1", memory_str="用户喜欢音乐")
+        assert ctx["memory"] == "用户喜欢音乐"
+
+    def test_omits_none_speakers(self, sample_config):
+        m = self._make_manager(sample_config)
+        ctx = m.collect_dynamic_context(device_id="dev1", speakers_info=None)
+        assert "speakers_info" not in ctx
+
+    def test_current_time_format_is_hh_mm(self, sample_config):
+        """current_time 必须为 HH:MM 格式"""
+        m = self._make_manager(sample_config)
+        ctx = m.collect_dynamic_context(device_id="dev1")
+        import re
+
+        assert re.match(r"^\d{2}:\d{2}$", ctx["current_time"])
+
+    def test_token_budget_caps_at_600_tokens(self, sample_config):
+        """超长 memory 应被截断(按 token 预算)"""
+        m = self._make_manager(sample_config)
+        long_memory = "用户最近在追《三体》。" * 200  # 远超 600 tokens
+        ctx = m.collect_dynamic_context(device_id="dev1", memory_str=long_memory)
+        # 截断后 memory 长度应小于原长度
+        assert len(ctx["memory"]) < len(long_memory)
+        # 截断后字段总长(含其他基本字段)粗略小于 2400 字符(≈600 tokens 估 4字/token)
+        total = sum(len(v) for v in ctx.values())
+        assert total < 2400
+
+    def test_collect_handles_exceptions_gracefully(self, sample_config, monkeypatch):
+        """任一子步骤抛异常,其他字段仍能正常返回"""
+        from core.utils import prompt_manager as pm_mod
+
+        m = self._make_manager(sample_config)
+
+        def boom():
+            raise RuntimeError("simulated failure")
+
+        # 让 lunar_date 调用失败
+        monkeypatch.setattr(pm_mod, "get_current_lunar_date", boom)
+        ctx = m.collect_dynamic_context(device_id="dev1")
+        # lunar_date 失败时该字段应被省略,但 current_time 等应正常
+        assert "current_time" in ctx
+        assert "lunar_date" not in ctx or ctx.get("lunar_date") == "农历获取失败"

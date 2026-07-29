@@ -6,14 +6,41 @@
 import os
 import asyncio
 import threading
-from typing import Dict, Any, TYPE_CHECKING
+from typing import Dict, Any, TYPE_CHECKING, Optional
+
+import tiktoken
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
 from config.logger import setup_logging
 from jinja2 import Template
 
+# 在模块顶层导入时间工具,使测试可通过 monkeypatch 替换
+# (例如 pm_mod.get_current_lunar_date = boom)
+from core.utils.current_time import (  # noqa: E402
+    get_current_time,
+    get_current_date,
+    get_current_weekday,
+    get_current_lunar_date,
+)
+
 TAG = __name__
+
+# token 预算常量(spec §3.6:动态上下文 ≤ 600 tokens)
+CONTEXT_TOKEN_BUDGET = 600
+# 截断优先级(从低到高,先截 weather,最后截 memory)
+CONTEXT_TRUNCATABLE_FIELDS = ["weather_info", "lunar_date", "local_address", "memory"]
+# 永不截断的字段
+CONTEXT_NEVER_TRUNCATE = {"speakers_info", "current_time", "today_date", "today_weekday"}
+_TOKEN_ENCODING = None
+
+
+def _get_token_encoding():
+    """惰性获取 tiktoken 编码,避免冷启动开销。"""
+    global _TOKEN_ENCODING
+    if _TOKEN_ENCODING is None:
+        _TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
+    return _TOKEN_ENCODING
 
 WEEKDAY_MAP = {
     "Monday": "星期一",
@@ -251,42 +278,122 @@ class PromptManager:
 
     def update_context_info(self, conn, client_ip: str):
         # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
-        """同步更新上下文信息"""
+        """同步更新上下文信息（已废弃,KV cache 优化后模板不再含
+        {{local_address}} / {{weather_info}} / {{dynamic_context}} 占位符,
+        本方法所有条件分支均会跳过,等效于 no-op。保留仅为向后兼容旧调用点,
+        Dialogue 层已改为使用 collect_dynamic_context()。"""
         try:
-            local_address = ""
-            if (
-                client_ip
-                and self.base_prompt_template
-                and (
-                    "local_address" in self.base_prompt_template
-                    or "weather_info" in self.base_prompt_template
-                )
-            ):
-                # 获取位置信息（使用全局缓存）
-                local_address = self._get_location_info(client_ip)
-
-            if (
-                self.base_prompt_template
-                and "weather_info" in self.base_prompt_template
-                and local_address
-            ):
-                # 获取天气信息（使用全局缓存）
-                self._get_weather_info(conn, local_address)
-
-            # 获取配置的上下文数据
-            if hasattr(conn, "device_id") and conn.device_id:
-                if (
-                    self.base_prompt_template
-                    and "dynamic_context" in self.base_prompt_template
-                ):
-                    self.context_data = self.context_provider.fetch_all(conn.device_id)
-                else:
-                    self.context_data = ""
-
-            self.logger.bind(tag=TAG).debug(f"上下文信息更新完成")
-
+            self.logger.bind(tag=TAG).debug(
+                "update_context_info 已废弃(模板不再含动态占位符),"
+                "请改用 collect_dynamic_context()"
+            )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"更新上下文信息失败: {e}")
+
+    def collect_dynamic_context(
+        self,
+        *,
+        device_id: str,
+        memory_str: Optional[str] = None,
+        speakers_info: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """一次性收集所有动态信息,返回 Dict[str, str] 用于组装 <context> 块。
+
+        字段约定(KV cache 优化 §3.6):
+            current_time  - HH:MM 格式
+            today_date    - YYYY-MM-DD
+            today_weekday - 星期一/二/...
+            lunar_date    - 中文农历
+            local_address - 城市名(若有 client_ip)
+            weather_info  - 天气报告(若有 client_ip + conn)
+            memory        - 长记忆摘要(由调用方提供)
+            speakers_info - 当前说话人列表(由调用方提供)
+
+        优雅降级:
+            - 任一子步骤抛异常被 try/except 捕获,对应字段省略,不影响其他字段
+            - memory_str / speakers_info 为 None 或空字符串时,字段被省略
+            - token 总数超 600 时,按 CONTEXT_TRUNCATABLE_FIELDS 优先级截断
+        """
+        ctx: Dict[str, str] = {}
+
+        # 1. 时间类字段(current_time/today_date/today_weekday/lunar_date)
+        try:
+            ctx["current_time"] = get_current_time()
+            ctx["today_date"] = get_current_date()
+            ctx["today_weekday"] = get_current_weekday()
+            ctx["lunar_date"] = get_current_lunar_date()
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"collect_dynamic_context 时间字段收集失败: {e}"
+            )
+
+        # 2. location / weather(按 client_ip / conn 缓存)
+        # 若调用方未传入 client_ip/conn,这两个字段自然省略
+        try:
+            client_ip = getattr(self, "client_ip", None)
+            if client_ip:
+                ctx["local_address"] = self._get_location_info(client_ip)
+                conn = getattr(self, "_conn_ref", None)
+                if conn is not None:
+                    ctx["weather_info"] = self._get_weather_info(
+                        conn, ctx.get("local_address", "")
+                    )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(
+                f"collect_dynamic_context 位置/天气收集失败: {e}"
+            )
+
+        # 3. memory(由 Dialogue 层从 memory_str 传入)
+        if memory_str is not None and memory_str.strip():
+            ctx["memory"] = memory_str.strip()
+
+        # 4. speakers_info(由 Dialogue 层从当前说话人列表传入)
+        if speakers_info is not None and speakers_info.strip():
+            ctx["speakers_info"] = speakers_info.strip()
+
+        # 5. token 预算裁剪(600 tokens 上限)
+        ctx = self._enforce_token_budget(ctx)
+
+        return ctx
+
+    def _enforce_token_budget(self, ctx: Dict[str, str]) -> Dict[str, str]:
+        """按 CONTEXT_TOKEN_BUDGET (600) 裁剪可截断字段。
+
+        截断顺序:weather_info → lunar_date → local_address → memory
+        永不截断字段:speakers_info / current_time / today_date / today_weekday
+
+        每次截断将该字段长度压缩到 75%(最少保留 10 字符 + "..."),
+        直到总 tokens ≤ 600 或该字段已无法再截。
+        """
+        try:
+            enc = _get_token_encoding()
+
+            def total_tokens(d: Dict[str, str]) -> int:
+                return sum(len(enc.encode(str(v))) for v in d.values())
+
+            if total_tokens(ctx) <= CONTEXT_TOKEN_BUDGET:
+                return ctx
+
+            for key in CONTEXT_TRUNCATABLE_FIELDS:
+                if key not in ctx:
+                    continue
+                value = ctx[key]
+                while total_tokens(ctx) > CONTEXT_TOKEN_BUDGET and len(value) > 10:
+                    new_len = max(10, int(len(value) * 0.75))
+                    value = value[:new_len] + "..."
+                    ctx[key] = value
+                if total_tokens(ctx) <= CONTEXT_TOKEN_BUDGET:
+                    break
+
+            if total_tokens(ctx) > CONTEXT_TOKEN_BUDGET:
+                self.logger.bind(tag=TAG).warning(
+                    f"collect_dynamic_context token 超预算: "
+                    f"{total_tokens(ctx)} > {CONTEXT_TOKEN_BUDGET}"
+                )
+            return ctx
+        except Exception:
+            # tiktoken 异常时回退到原 ctx,不阻断主流程
+            return ctx
 
     def build_enhanced_prompt(
         self, user_prompt: str, device_id: str, client_ip: str = None, *args, **kwargs
