@@ -1,18 +1,40 @@
+from typing import List, Dict, Optional
 import uuid
-import re
-from typing import List, Dict
-from datetime import datetime
+
+
+# 字段顺序固定常量（spec §3.5）
+CONTEXT_FIELD_ORDER = [
+    "current_time",
+    "today_date",
+    "today_weekday",
+    "lunar_date",
+    "local_address",
+    "weather_info",
+    "memory",
+    "speakers_info",
+]
+
+CONTEXT_FIELD_LABELS = {
+    "current_time": "当前时间",
+    "today_date": "今天日期",
+    "today_weekday": "星期",
+    "lunar_date": "农历",
+    "local_address": "设备位置",
+    "weather_info": "本地天气",
+    "memory": "记忆",
+    "speakers_info": "说话人信息",
+}
 
 
 class Message:
     def __init__(
-            self,
-            role: str,
-            content: str = None,
-            uniq_id: str = None,
-            tool_calls=None,
-            tool_call_id=None,
-            is_temporary=False,
+        self,
+        role: str,
+        content: str = None,
+        uniq_id: str = None,
+        tool_calls=None,
+        tool_call_id=None,
+        is_temporary=False,
     ):
         self.uniq_id = uniq_id if uniq_id is not None else str(uuid.uuid4())
         self.role = role
@@ -25,8 +47,6 @@ class Message:
 class Dialogue:
     def __init__(self):
         self.dialogue: List[Message] = []
-        # 获取当前时间
-        self.current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def put(self, message: Message):
         self.dialogue.append(message)
@@ -48,9 +68,8 @@ class Dialogue:
             dialogue.append({"role": m.role, "content": m.content})
 
     def get_llm_dialogue(self) -> List[Dict[str, str]]:
-        # 直接调用get_llm_dialogue_with_memory，传入None作为memory_str
-        # 这样确保说话人功能在所有调用路径下都生效
-        return self.get_llm_dialogue_with_memory(None, None)
+        """向后兼容 wrapper:不传 dynamic_context。"""
+        return self.get_llm_dialogue_with_memory(None)
 
     def update_system_message(self, new_content: str):
         """更新或添加系统消息"""
@@ -91,73 +110,92 @@ class Dialogue:
 
         return result
 
+    def _build_context_block(
+        self, dynamic_context: Optional[Dict[str, str]]
+    ) -> Optional[str]:
+        """按固定顺序组装 <context>...</context> 块;全空返回 None。
+
+        Args:
+            dynamic_context: 各字段值,None / 空字符串 / 仅空白跳过该字段。
+
+        Returns:
+            形如 "<context>\\n- K: V\\n...</context>" 的字符串,或 None。
+        """
+        if not dynamic_context:
+            return None
+        try:
+            lines = []
+            for key in CONTEXT_FIELD_ORDER:
+                value = dynamic_context.get(key)
+                if value is None:
+                    continue
+                if not isinstance(value, str):
+                    continue
+                stripped = value.strip()
+                if not stripped:
+                    continue
+                label = CONTEXT_FIELD_LABELS.get(key, key)
+                lines.append(f"- {label}: {stripped}")
+            if not lines:
+                return None
+            return "<context>\n" + "\n".join(lines) + "\n</context>"
+        except Exception:
+            return None
+
+    def _find_last_user_index(
+        self, dialogue: List[Dict[str, str]]
+    ) -> Optional[int]:
+        """找到最后一条 role=='user' 消息的索引;找不到返回 None。
+
+        仅当 dialogue 以 user 消息结尾时返回其索引;以 assistant/tool 结尾时返回 None,
+        避免把已经处理过/正在处理的历史 user 消息误当作"当前 user 输入"。
+        """
+        try:
+            if not dialogue:
+                return None
+            if dialogue[-1].get("role") == "user":
+                return len(dialogue) - 1
+            return None
+        except Exception:
+            return None
+
     def get_llm_dialogue_with_memory(
-            self, memory_str: str = None, voiceprint_config: dict = None,
-            current_speaker: str = None,
+        self,
+        dynamic_context: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, str]]:
-        # 构建对话
+        """构建 LLM 请求用的 dialogue 列表。
+
+        Args:
+            dynamic_context: 动态上下文 dict。None / 空 dict → 不注入。
+        """
         dialogue = []
 
-        # 添加系统提示和记忆
+        # 1. system 消息原样取(零修改)
         system_message = next(
             (msg for msg in self.dialogue if msg.role == "system"), None
         )
-
         if system_message:
-            full_prompt = system_message.content
+            dialogue.append({"role": "system", "content": system_message.content})
 
-            # 替换时间占位符
-            full_prompt = full_prompt.replace(
-                "{{current_time}}", datetime.now().strftime("%H:%M")
-            )
-
-            # 填充记忆
-            if memory_str is not None:
-                full_prompt = re.sub(
-                    r"<memory>.*?</memory>",
-                    f"<memory>\n{memory_str}\n</memory>",
-                    full_prompt,
-                    flags=re.DOTALL,
-                )
-
-            # 追加说话人信息
-            try:
-                current_speaker_name = (current_speaker or "").strip()
-                # 仅在本轮注入了有效身份时才输出 speakers_info，避免列表里的名字每轮
-                # 重复出现诱导模型反复称呼；后续轮不再注入身份，靠对话历史首轮保留
-                if current_speaker_name and current_speaker_name != "未知说话人":
-                    speakers = voiceprint_config.get("speakers", [])
-                    speakers_info = "\n<speakers_info>"
-                    speakers_info += f"\n当前说话人：{current_speaker_name}"
-                    for speaker_str in speakers:
-                        try:
-                            parts = speaker_str.split(",", 2)
-                            if len(parts) >= 2:
-                                name = parts[1].strip()
-                                description = (
-                                    parts[2].strip() if len(parts) >= 3 else ""
-                                )
-                                speakers_info += f"\n- {name}：{description}"
-                        except:
-                            pass
-                    speakers_info += "\n</speakers_info>"
-                    full_prompt += speakers_info
-            except:
-                pass
-
-            dialogue.append({"role": "system", "content": full_prompt})
-
-        # 第二段：few-shot 示例（会话内不变）
-        non_system_messages = [m for m in self.dialogue if m.role != "system"]
-        fewshot_messages = [m for m in non_system_messages if m.is_temporary]
-        complete_fewshot = self._ensure_tool_calls_complete(fewshot_messages)
+        # 2. few-shot 序列
+        non_system = [m for m in self.dialogue if m.role != "system"]
+        fewshot = [m for m in non_system if m.is_temporary]
+        complete_fewshot = self._ensure_tool_calls_complete(fewshot)
         for m in complete_fewshot:
             self.getMessages(m, dialogue)
 
-        # 第三段：实际对话历史（不含 few-shot）
-        actual_messages = [m for m in non_system_messages if not m.is_temporary]
-        complete_actual = self._ensure_tool_calls_complete(actual_messages)
+        # 3. 实际历史
+        actual = [m for m in non_system if not m.is_temporary]
+        complete_actual = self._ensure_tool_calls_complete(actual)
         for m in complete_actual:
             self.getMessages(m, dialogue)
+
+        # 4. 前置注入 dynamic_context
+        ctx_block = self._build_context_block(dynamic_context)
+        if ctx_block:
+            last_user_idx = self._find_last_user_index(dialogue)
+            if last_user_idx is not None:
+                orig = dialogue[last_user_idx].get("content") or ""
+                dialogue[last_user_idx]["content"] = f"{ctx_block}\n\n{orig}"
 
         return dialogue
