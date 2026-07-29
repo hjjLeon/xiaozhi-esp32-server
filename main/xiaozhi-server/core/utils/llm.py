@@ -7,6 +7,7 @@ project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
 sys.path.insert(0, project_root)
 
 from config.logger import setup_logging
+from core.providers.llm.base import LoggingLLMWrapper
 import importlib
 
 logger = setup_logging()
@@ -18,6 +19,8 @@ def create_instance(class_name, *args, **kwargs):
         lib_name = f'core.providers.llm.{class_name}.{class_name}'
         if lib_name not in sys.modules:
             sys.modules[lib_name] = importlib.import_module(f'{lib_name}')
-        return sys.modules[lib_name].LLMProvider(*args, **kwargs)
+        provider = sys.modules[lib_name].LLMProvider(*args, **kwargs)
+        # 用日志包装器包裹，自动统计每次请求的上下文长度
+        return LoggingLLMWrapper(provider)
 
     raise ValueError(f"不支持的LLM类型: {class_name}，请检查该配置的type是否设置正确")
