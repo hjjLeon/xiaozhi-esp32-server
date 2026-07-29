@@ -166,6 +166,7 @@ class PromptManager:
         return user_prompt
 
     def _get_current_time_info(self) -> tuple:
+        # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
         """获取当前时间信息"""
         from .current_time import (
             get_current_date,
@@ -180,6 +181,7 @@ class PromptManager:
         return today_date, today_weekday, lunar_date
 
     def _get_location_info(self, client_ip: str) -> str:
+        # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
         """获取位置信息"""
         try:
             # 先从缓存获取
@@ -202,6 +204,7 @@ class PromptManager:
             return "未知位置"
 
     def _get_weather_info(self, conn: "ConnectionHandler", location: str) -> str:
+        # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
         """获取天气信息"""
         try:
             # 先从缓存获取
@@ -247,6 +250,7 @@ class PromptManager:
             return "天气信息获取失败"
 
     def update_context_info(self, conn, client_ip: str):
+        # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
         """同步更新上下文信息"""
         try:
             local_address = ""
