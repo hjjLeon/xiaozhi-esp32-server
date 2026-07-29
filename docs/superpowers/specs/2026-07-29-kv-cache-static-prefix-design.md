@@ -230,6 +230,28 @@ async def chat(self, query, ...):
 - 第一行 `- 当前说话人: <name>`
 - 后续每行 `- <name>:<description>`（按 voiceprint_config 中的 speakers 列表顺序）
 
+### 3.6 Token 预算策略
+
+动态上下文会稳定增加每条 user 消息的字节长度。为防止 context 块过大淹没用户意图或超过模型上下文窗口，需做预算控制：
+
+- **总预算上限**：context 块最大 600 tokens（按 tiktoken `cl100k_base` 估算，留余量）
+- **截断优先级**（从最不重要开始截）：
+  1. `weather_info`：截到首句
+  2. `lunar_date`：超过 30 字则省略
+  3. `local_address`：截到省市两级
+  4. `memory`：超 400 tokens 时按句截断，保留最近 N 条
+  5. `speakers_info` / `current_time` / `today_date` / `today_weekday`：**永不截断**
+- **实现位置**：`prompt_manager.collect_dynamic_context()` 返回前做预算裁剪，或 `_build_context_block` 内做；具体实现位置在 plan 阶段确定
+- **超预算日志**：warn 级别，记录各字段实际 token 数
+
+### 3.7 启动期模板残留校验（防御性）
+
+如果用户自定义模板文件仍含 `{{current_time}}` / `{{memory}}` 等占位符，Jinja 渲染后会保留为字面字符串（不会被运行时替换），用户可能长期静默失效。
+
+- **校验时机**：`prompt_manager._load_base_template()` 首次加载时
+- **校验方法**：渲染后结果正则匹配 `\{\{[a-z_]+\}\}`，命中即 warn 日志提示用户更新模板
+- **不阻断**：只 warn，不阻止加载（向后兼容旧模板）
+
 **空值规则**：
 - 任一字段为空字符串 / None / 仅空白 → 该行整行省略
 - 整个 dict 全空 → 返回 None → dialogue 不做任何注入
@@ -240,10 +262,12 @@ async def chat(self, query, ...):
 
 | 场景 | 行为 |
 |------|------|
-| 最后一条消息不是 user（如 assistant 正在 tool_call） | `_find_last_user_index` 返回 None → 跳过注入，dynamic_context 留到下一轮 |
+| 最后一条消息不是 user（如 assistant 正在 tool_call） | `_find_last_user_index` 返回 None → **本轮跳过注入**；`dynamic_context` **不缓存**，每轮由 `chat()` 重新生成，下一条 user 消息到来时自然处理 |
+| 连续多轮非 user 消息 | 每轮重新生成 dynamic_context（不堆积、不丢失）；任意一轮检测到 user 即注入；只在连续纯 tool_call 链路内模型临时缺少背景信息 |
 | dynamic_context 全空 | 返回 None → user 消息原样发送 |
 | memory_str 为 None | context 块省略 `- 记忆:` 行 |
-| current_speaker 为 None 或 "未知说话人" | speakers_info 不进 dict |
+| memory_str 过长（超 token 预算） | 按预定义上限截断（见 §3.6 token 预算策略） |
+| current_speaker 为 None 或 "未知说话人" | speakers_info 不进 dict；`last_speaker_for_system` 不更新 |
 | voiceprint_config 缺失或为空 | speakers_info 字段 = None |
 | `datetime.now()` 抛异常 | try/except；current_time = "未知" |
 | 用户自定义模板仍含 `{{current_time}}` | Jinja 渲染保留为字面字符串；运行时不做替换 |
@@ -266,6 +290,11 @@ async def chat(self, query, ...):
 - `LoggingLLMWrapper`（`base.py:34`）记录 context 块大小（字符数）+ 各字段是否非空
 - 失败注入：warn 级别，含 query hash（不含 PII）
 - 不记录 context 块完整内容
+- **异常分级**（3.8）：
+  - `ERROR` 级别：致命故障（如模板加载失败）
+  - `WARN` 级别：可恢复降级（如 weather API 超时、模板残留占位符、token 超预算截断、最后一次非 user 跳过注入连续 N 轮）
+  - `INFO` 级别：常规观测（context 块大小、字段非空计数）
+  - `DEBUG` 级别：完整字段调试信息（默认关闭）
 
 **优雅降级**：所有失败路径必须保证 LLM 调用仍能成功，仅丢失动态上下文功能。
 
@@ -323,3 +352,28 @@ async for token, tool_call in self.llm.response_with_functions(
 | `self.dialogue` 内存历史 | ❌ | 只修改序列化输出,不动 `Message.content` |
 | 持久化 JSON 文件 | ❌ | 持久化的是 Message 对象,不受影响 |
 | 注入只发生在 `get_llm_dialogue_with_memory` 返回的新 list 上 | — | 不写回 |
+
+---
+
+## 6. 评审记录与实施准备建议
+
+### 6.1 评审已采纳的改进项（已纳入本 spec）
+
+- **§3.6 Token 预算策略**：context 块最大 600 tokens，memory 字段优先截断
+- **§4 最后一条非 user 处理**：明确"不缓存、每轮重新生成"语义
+- **§3.7 启动期模板残留校验**：防御性 warn，不阻断加载
+- **§4 异常分级**：ERROR / WARN / INFO / DEBUG 四级日志
+
+### 6.2 实施阶段需关注的项（不在本 spec 范围内）
+
+- **3.3 短 user 消息干扰**：观察极短输入（如"嗯""好的"）下模型是否仍能区分 context 与用户意图；如有问题可加显式分隔符或前导自然语言指令
+- **3.4 模型对末尾 context 遵从度**：在测试阶段对关键功能（天气回答、记忆利用）做遵从率对比；若效果下降，可尝试 `<context>` 前加引导语
+- **3.5 字段顺序语义影响**：固定顺序固定，但可在 plan 阶段用 A/B 数据调整优先级（如将 `memory` 和 `speakers_info` 后移）
+- **3.8 重连后 speakers_info 重注入**：当前设计已可接受；如未来出现频繁重连场景，可考虑持久化 `last_speaker_for_system` 到设备级缓存
+
+### 6.3 上线策略
+
+- **回归测试**：首轮对话 / 记忆检索成功失败 / 天气缓存命中过期 / 多说话人切换 / 连续 tool_call / 连接断开重连
+- **性能基线**：上线前记录当前方案下的首 token 延迟、总生成时间、KV cache 命中率
+- **灰度发布**：先对部分设备或低峰时段启用新逻辑，观察命中率提升和回复质量
+- **回滚预案**：保留旧逻辑分支在 feature flag 后（本次硬迁移不引入 flag，但可在 plan 阶段讨论是否需要）
