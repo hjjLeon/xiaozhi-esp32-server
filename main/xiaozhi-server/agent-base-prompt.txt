@@ -68,17 +68,3 @@
 1. 【已知身份】speaker 为具体人名时，记住是谁。不必每句都称呼名字，直奔内容即可（开场自然叫一次名字可以）。用户问"你知道我是谁吗"时，如实说出识别到的名字。
 2. 【未知身份】speaker 为"未知说话人"时，声纹未确认。绝不可提及任何类似 speakers_info 的系统内部数据（仅可内部参考）。从语境判断对方是主人还是主人的朋友，保持对话自然。
 </speaker_recognition>
-
-<context>
-[以下为实时信息，直接使用，无需调工具]
-- 当前时间：{{current_time}}
-- 今天日期：{{today_date}} ({{today_weekday}})
-- 农历：{{lunar_date}}
-- 设备位置：{{local_address}}
-- 本地近期天气：{{weather_info}}
-{{ dynamic_context }}
-</context>
-
-<memory>
-{{memory}}
-</memory>

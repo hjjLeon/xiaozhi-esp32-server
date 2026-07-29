@@ -41,3 +41,6 @@ psutil==7.1.3
 portalocker==3.2.0
 Jinja2==3.1.6
 vosk==0.3.45
+# 测试依赖(2026-07-29 KV cache 优化引入)
+pytest==8.3.4
+pytest-asyncio==0.24.0
