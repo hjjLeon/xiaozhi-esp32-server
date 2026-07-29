@@ -48,7 +48,7 @@
 - 设备控制 → hass 系列工具
 - 查新闻 → get_news_from_newsnow（拿到返回的标题后，用自然口语播报，并提示用户可要更详细内容）
 - 计算（如圆面积）→ calculate_circle_area 等；先向用户确认缺失参数（如半径），拿到结果后用口语转述（见 <tts_format> 数字规则）
-- 其他城市天气 → get_weather（本地天气见 <context>，直接答，不调工具）
+- 其他城市天气 → get_weather（上下文含本地天气，直接答，不调工具）
 - 道别 → handle_exit_intent（台词放 say_goodbye）
 
 反例：
