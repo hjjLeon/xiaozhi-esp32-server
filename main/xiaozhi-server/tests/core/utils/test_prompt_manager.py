@@ -113,3 +113,19 @@ class TestCollectDynamicContext:
         # lunar_date 失败时该字段应被省略,但 current_time 等应正常
         assert "current_time" in ctx
         assert "lunar_date" not in ctx or ctx.get("lunar_date") == "农历获取失败"
+
+    def test_collect_without_tiktoken_uses_char_estimation(self, sample_config, monkeypatch):
+        """C3 修复: tiktoken 不可用时 collect_dynamic_context 仍返回,按字符估算。"""
+        from core.utils import prompt_manager as pm_mod
+
+        # 强制 tiktoken 不可用
+        monkeypatch.setattr(pm_mod, "_HAVE_TIKTOKEN", False)
+        monkeypatch.setattr(pm_mod, "_TOKEN_ENCODING", None)
+
+        m = self._make_manager(sample_config)
+        ctx = m.collect_dynamic_context(device_id="dev1", memory_str="x" * 5000)
+        # 即使超长 memory 也应返回 dict,不抛异常
+        assert isinstance(ctx, dict)
+        assert "current_time" in ctx
+        # 超长字段应被截断(按字符估算)
+        assert len(ctx["memory"]) < 5000

@@ -52,8 +52,22 @@ class LoggingLLMWrapper:
         )
 
     def response_no_stream(self, system_prompt, user_prompt, **kwargs):
+        self._log_no_stream_input(system_prompt, user_prompt)
         return self._provider.response_no_stream(
             system_prompt, user_prompt, **kwargs
+        )
+
+    def _log_no_stream_input(self, system_prompt, user_prompt):
+        """M0: 与 response/response_with_functions 对称, 记录 no_stream 路径的 token 估算。"""
+        model_name = getattr(self._provider, "model_name", "unknown")
+        messages = [
+            {"role": "system", "content": system_prompt or ""},
+            {"role": "user", "content": user_prompt or ""},
+        ]
+        est = estimate_input_tokens(messages)
+        logger.bind(tag=TAG).info(
+            f"请求 LLM（no_stream），模型：{model_name}，"
+            f"估算 tokens：{est}"
         )
 
     def _log_input(self, session_id, dialogue, functions):
@@ -68,14 +82,6 @@ class LoggingLLMWrapper:
             f"工具数：{tools_count}，"
             f"估算 tokens：{est}"
         )
-        # TODO: [临时调试] 测试完成后删除此段
-        logger.bind(tag=TAG).info(
-            f"【上下文-消息】\n{json.dumps(dialogue, ensure_ascii=False, indent=2)}"
-        )
-        if functions:
-            logger.bind(tag=TAG).info(
-                f"【上下文-工具】\n{json.dumps(functions, ensure_ascii=False, indent=2)}"
-            )
 
     def __getattr__(self, name):
         """透传其他属性和方法到原始 Provider"""

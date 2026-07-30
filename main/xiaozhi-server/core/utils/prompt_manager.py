@@ -8,7 +8,12 @@ import asyncio
 import threading
 from typing import Dict, Any, TYPE_CHECKING, Optional
 
-import tiktoken
+# tiktoken 是可选依赖:不可用时回退到字符估算
+try:
+    import tiktoken
+    _HAVE_TIKTOKEN = True
+except ImportError:
+    _HAVE_TIKTOKEN = False
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
@@ -30,16 +35,22 @@ TAG = __name__
 CONTEXT_TOKEN_BUDGET = 600
 # 截断优先级(从低到高,先截 weather,最后截 memory)
 CONTEXT_TRUNCATABLE_FIELDS = ["weather_info", "lunar_date", "local_address", "memory"]
-# 永不截断的字段
+# 永不截断的字段(供文档/未来扩展;截断循环天然不命中,仅遍历 CONTEXT_TRUNCATABLE_FIELDS)
 CONTEXT_NEVER_TRUNCATE = {"speakers_info", "current_time", "today_date", "today_weekday"}
+# 截断循环最大迭代次数(防御性, 防死循环)
+_MAX_BUDGET_ITERATIONS = 20
+# tiktoken 编码器(惰性初始化, L4: 多连接并发下用锁保护)
 _TOKEN_ENCODING = None
+_TOKEN_ENCODING_LOCK = threading.Lock()
 
 
 def _get_token_encoding():
-    """惰性获取 tiktoken 编码,避免冷启动开销。"""
+    """惰性获取 tiktoken 编码,避免冷启动开销。tiktoken 不可用时返回 None。"""
     global _TOKEN_ENCODING
-    if _TOKEN_ENCODING is None:
-        _TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
+    if _TOKEN_ENCODING is None and _HAVE_TIKTOKEN:
+        with _TOKEN_ENCODING_LOCK:
+            if _TOKEN_ENCODING is None and _HAVE_TIKTOKEN:  # double-check
+                _TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
     return _TOKEN_ENCODING
 
 WEEKDAY_MAP = {
@@ -80,11 +91,13 @@ EMOJI_List = [
 class PromptManager:
     """系统提示词管理器，负责管理和更新系统提示词"""
 
-    def __init__(self, config: Dict[str, Any], logger=None):
+    def __init__(self, config: Dict[str, Any], logger=None, conn_ref=None):
         self.config = config
         self.logger = logger or setup_logging()
         self.base_prompt_template = None
         self.last_update_time = 0
+        # 持有 ConnectionHandler 引用, 用于 collect_dynamic_context 动态读取 client_ip
+        self._conn_ref = conn_ref
 
         # 导入全局缓存管理器
         from core.utils.cache.manager import cache_manager, CacheType
@@ -102,6 +115,10 @@ class PromptManager:
 
     def _load_base_template(self):
         """加载基础提示词模板,返回模板字符串(未找到时返回 None)。
+
+        Returns:
+            模板字符串;未找到时返回 None。调用方目前仅消费副作用
+            (self.base_prompt_template),返回值供未来扩展可选使用。
 
         同时复用 KV cache 静态前缀优化的残留检测:如果模板仍含已废弃的
         动态占位符(如 {{current_time}}),打印 WARN 提示(不阻断加载)。
@@ -160,6 +177,11 @@ class PromptManager:
             "{{weather_info}}",
             "{{memory}}",
             "{{ dynamic_context }}",
+            # H4 预防性: 这些变量如出现在模板会破坏 KV cache 前缀稳定
+            "{{device_id}}",
+            "{{client_ip}}",
+            "device_id",
+            "client_ip",
         )
         found = [p for p in deprecated if p in template]
         if found:
@@ -192,23 +214,7 @@ class PromptManager:
         self.logger.bind(tag=TAG).info(f"使用快速提示词: {user_prompt[:50]}...")
         return user_prompt
 
-    def _get_current_time_info(self) -> tuple:
-        # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
-        """获取当前时间信息"""
-        from .current_time import (
-            get_current_date,
-            get_current_weekday,
-            get_current_lunar_date,
-        )
-
-        today_date = get_current_date()
-        today_weekday = get_current_weekday()
-        lunar_date = get_current_lunar_date() + "\n"
-
-        return today_date, today_weekday, lunar_date
-
     def _get_location_info(self, client_ip: str) -> str:
-        # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
         """获取位置信息"""
         try:
             # 先从缓存获取
@@ -231,7 +237,6 @@ class PromptManager:
             return "未知位置"
 
     def _get_weather_info(self, conn: "ConnectionHandler", location: str) -> str:
-        # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
         """获取天气信息"""
         try:
             # 先从缓存获取
@@ -276,19 +281,10 @@ class PromptManager:
             self.logger.bind(tag=TAG).error(f"获取天气信息失败: {e}")
             return "天气信息获取失败"
 
-    def update_context_info(self, conn, client_ip: str):
-        # TODO(kv-cache-2026-07-29): dead code, Task 2/3 refactor will remove
-        """同步更新上下文信息（已废弃,KV cache 优化后模板不再含
-        {{local_address}} / {{weather_info}} / {{dynamic_context}} 占位符,
-        本方法所有条件分支均会跳过,等效于 no-op。保留仅为向后兼容旧调用点,
-        Dialogue 层已改为使用 collect_dynamic_context()。"""
-        try:
-            self.logger.bind(tag=TAG).debug(
-                "update_context_info 已废弃(模板不再含动态占位符),"
-                "请改用 collect_dynamic_context()"
-            )
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"更新上下文信息失败: {e}")
+    def update_context_info(self, conn, client_ip: str):  # noqa: D401
+        """向后兼容占位（已废弃）。KV cache 优化后该方法无副作用,调用点已全部移除。"""
+        # 完整方法体删除 — 原实现仅含 debug 日志, 与 collect_dynamic_context 重复
+        return
 
     def collect_dynamic_context(
         self,
@@ -329,11 +325,16 @@ class PromptManager:
 
         # 2. location / weather(按 client_ip / conn 缓存)
         # 若调用方未传入 client_ip/conn,这两个字段自然省略
+        # C2 修复后来源优先级: self._conn_ref.client_ip (生产) > self.client_ip (老 API 兼容)
         try:
-            client_ip = getattr(self, "client_ip", None)
+            conn = getattr(self, "_conn_ref", None)
+            client_ip = None
+            if conn is not None:
+                client_ip = getattr(conn, "client_ip", None)
+            if client_ip is None:
+                client_ip = getattr(self, "client_ip", None)
             if client_ip:
                 ctx["local_address"] = self._get_location_info(client_ip)
-                conn = getattr(self, "_conn_ref", None)
                 if conn is not None:
                     ctx["weather_info"] = self._get_weather_info(
                         conn, ctx.get("local_address", "")
@@ -369,6 +370,9 @@ class PromptManager:
             enc = _get_token_encoding()
 
             def total_tokens(d: Dict[str, str]) -> int:
+                if enc is None:
+                    # tiktoken 不可用:按字符估算 (混合中文取保守值 3 字符/token)
+                    return sum(len(str(v)) for v in d.values()) // 3
                 return sum(len(enc.encode(str(v))) for v in d.values())
 
             if total_tokens(ctx) <= CONTEXT_TOKEN_BUDGET:
@@ -378,9 +382,18 @@ class PromptManager:
                 if key not in ctx:
                     continue
                 value = ctx[key]
-                while total_tokens(ctx) > CONTEXT_TOKEN_BUDGET and len(value) > 10:
+                for _ in range(_MAX_BUDGET_ITERATIONS):
+                    if total_tokens(ctx) <= CONTEXT_TOKEN_BUDGET or len(value) <= 10:
+                        break
                     new_len = max(10, int(len(value) * 0.75))
-                    value = value[:new_len] + "..."
+                    candidate = value[:new_len] + "..."
+                    if len(candidate) >= len(value):  # 单调性失败: 截断后反而更长
+                        self.logger.bind(tag=TAG).warning(
+                            f"_enforce_token_budget 单调性失败, 字段 {key} 强制截断"
+                        )
+                        ctx[key] = value[:max(10, len(value) - 1)]
+                        break
+                    value = candidate
                     ctx[key] = value
                 if total_tokens(ctx) <= CONTEXT_TOKEN_BUDGET:
                     break
@@ -396,12 +409,16 @@ class PromptManager:
             return ctx
 
     def build_enhanced_prompt(
-        self, user_prompt: str, device_id: str, client_ip: str = None, *args, **kwargs
+        self, user_prompt: str, device_id: str, *args, **kwargs
     ) -> str:
         """构建增强的系统提示词（仅替换静态变量,保持 KV cache 前缀稳定）。
 
         动态上下文(时间/位置/天气/记忆)由 Dialogue 层在每轮对话时注入,
         不再混入系统提示词中,以最大化 KV cache 静态前缀复用率。
+
+        H4 预防性: device_id 仅用于 device_prompt 缓存 key,
+        不再注入模板 render —— 任何 connection 级变量注入都会破坏 KV cache 稳定。
+        额外 kwargs 仅允许白名单（emoji_enabled）, 其它写 warn 并丢弃。
         """
         if not self.base_prompt_template:
             return user_prompt
@@ -416,16 +433,25 @@ class PromptManager:
             )
             self.logger.bind(tag=TAG).debug(f"获取到选择的语言: {language}")
 
+            # kwargs 白名单: 防有人误传动态内容导致 KV cache 失效
+            allowed_kwargs = {"emoji_enabled"}
+            extra_kwargs = {k: v for k, v in kwargs.items() if k not in allowed_kwargs}
+            if extra_kwargs:
+                self.logger.bind(tag=TAG).warning(
+                    f"build_enhanced_prompt 收到非白名单 kwargs {list(extra_kwargs.keys())},"
+                    "已忽略（防止破坏 KV cache 前缀稳定）"
+                )
+            safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed_kwargs}
+
             # 仅替换静态变量,保持 KV cache 前缀稳定
+            # 显式不传 device_id / client_ip（防止 connection 级变量渗入前缀）
             template = Template(self.base_prompt_template)
             enhanced_prompt = template.render(
                 base_prompt=user_prompt,
                 emojiList=EMOJI_List,
-                device_id=device_id,
-                client_ip=client_ip,
                 language=language,
                 *args,
-                **kwargs,
+                **safe_kwargs,
             )
             if device_id:
                 device_cache_key = f"device_prompt:{device_id}"

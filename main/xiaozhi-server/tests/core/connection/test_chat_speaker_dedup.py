@@ -33,59 +33,29 @@ class TestLastSpeakerState:
         mock_handler.last_speaker_for_system = "张三"
         assert mock_handler.last_speaker_for_system == "张三"
 
-    def test_dedup_logic_first_time_injects(self, mock_handler):
-        current = "张三"
-        if current and current != "未知说话人":
-            if current != mock_handler.last_speaker_for_system:
-                mock_handler.last_speaker_for_system = current
-                should_inject = True
-            else:
-                should_inject = False
-        else:
-            should_inject = False
-        assert should_inject is True
-        assert mock_handler.last_speaker_for_system == "张三"
+    def test_close_resets_last_speaker(self, mock_handler):
+        """M3: close() 应在最开始把 last_speaker_for_system 重置为 None（行为验证）。"""
+        import asyncio
 
-    def test_dedup_logic_same_speaker_no_inject(self, mock_handler):
         mock_handler.last_speaker_for_system = "张三"
-        current = "张三"
-        if current and current != "未知说话人":
-            should_inject = current != mock_handler.last_speaker_for_system
-        else:
-            should_inject = False
-        assert should_inject is False
-        assert mock_handler.last_speaker_for_system == "张三"
+        # close() 后续副作用用 mock 兜底, 只验证 reset 行为
+        mock_handler.timeout_task = None
+        mock_handler.vad = None
+        mock_handler.audio_buffer = MagicMock()
+        mock_handler._aec_cache_cleanup_task = None
+        mock_handler.aec_audio_cache = MagicMock()
+        mock_handler.func_handler = MagicMock()
 
-    def test_dedup_logic_unknown_speaker_no_update(self, mock_handler):
-        mock_handler.last_speaker_for_system = "张三"
-        current = "未知说话人"
-        if current and current != "未知说话人":
-            mock_handler.last_speaker_for_system = current
-            should_inject = True
-        else:
-            should_inject = False
-        assert should_inject is False
-        assert mock_handler.last_speaker_for_system == "张三"  # 保留
+        with patch.object(mock_handler.func_handler, "cleanup", create=True):
+            try:
+                asyncio.run(mock_handler.close())
+            except Exception:
+                # 任何后续副作用因 mock 不全而崩不影响; reset 在 close 第一行已发生
+                pass
 
-    def test_dedup_logic_none_speaker_no_update(self, mock_handler):
-        mock_handler.last_speaker_for_system = "张三"
-        current = None
-        if current and current != "未知说话人":
-            mock_handler.last_speaker_for_system = current
-            should_inject = True
-        else:
-            should_inject = False
-        assert should_inject is False
-        assert mock_handler.last_speaker_for_system == "张三"  # 保留
-
-    def test_close_resets_to_none(self, mock_handler):
-        mock_handler.last_speaker_for_system = "张三"
-        # close() 应重置
-        if hasattr(mock_handler, "close"):
-            mock_handler.close()
-        # 如果 close() 实际执行有副作用，这里手动模拟
-        mock_handler.last_speaker_for_system = None
-        assert mock_handler.last_speaker_for_system is None
+        assert mock_handler.last_speaker_for_system is None, (
+            "close() 必须在最开始把 last_speaker_for_system 重置为 None"
+        )
 
 
 class TestBuildSpeakersInfo:
@@ -119,91 +89,64 @@ class TestChatDynamicContextPipeline:
         mock_handler.client_abort = False
         mock_handler.client_listen_mode = "auto"
         mock_handler.current_speaker = None
-        mock_handler.system_introduced_speakers = set()
         mock_handler.features = {"emoji": False}
         mock_handler.logger = MagicMock()
         mock_handler.sentence_id = "test-sentence-id"
         # 用 depth=1 调用以跳过 depth==0 的 TTS 初始化,但下面我们仍设 tts mock 以防万一
         return mock_handler
 
-    def test_chat_passes_dynamic_context_to_dialogue(self, mock_handler):
-        """chat() 必须用新签名调用 dialogue.get_llm_dialogue_with_memory(dict)"""
+    def test_dedup_via_real_chat_path(self, mock_handler):
+        """真实 chat() 路径: 首次说话人识别后, last_speaker_for_system 应被更新。"""
         self._setup_mock_handler_with_llm(mock_handler)
-        # 让 memory.query_memory 返回一个字符串,
-        # 旧代码会把它直接作为第一个位置参数传给 dialogue(签名错误)
-        mock_handler.memory = MagicMock()
-        mock_handler.loop = MagicMock()
+        mock_handler.current_speaker = "张三"
+        mock_handler._build_speakers_info = MagicMock(return_value="当前说话人:张三")
 
-        mock_handler.dialogue = MagicMock()
-        mock_handler.dialogue.put = MagicMock()
-        mock_handler.dialogue.get_llm_dialogue_with_memory = MagicMock(return_value=[])
+        try:
+            mock_handler.chat("hello", depth=1)
+        except Exception as e:
+            pytest.fail(f"chat() 在说话人识别前抛异常: {e!r}")
 
-        # 触发 chat
-        mock_future = MagicMock()
-        mock_future.result.return_value = "用户喜欢音乐"
-        with patch.object(
-            mock_handler, "_resolve_current_speaker", return_value=None, create=True
-        ):
-            with patch(
-                "core.connection.asyncio.run_coroutine_threadsafe",
-                return_value=mock_future,
-            ):
-                with patch.object(
-                    mock_handler.prompt_manager,
-                    "collect_dynamic_context",
-                    return_value={"current_time": "15:30", "memory": "用户喜欢音乐"},
-                ):
-                    try:
-                        mock_handler.chat("test query", depth=1)
-                    except Exception:
-                        pass  # 我们只关心调用参数
+        assert mock_handler.last_speaker_for_system == "张三", (
+            "chat() 应将 last_speaker_for_system 更新为识别到的说话人"
+        )
+        mock_handler._build_speakers_info.assert_called_once_with(
+            "张三", mock_handler._build_speakers_info.call_args.args[1]
+        )
 
-        # 验证新签名被调用
-        mock_handler.dialogue.get_llm_dialogue_with_memory.assert_called()
-        call_args = mock_handler.dialogue.get_llm_dialogue_with_memory.call_args
-        # dynamic_context 是 dict（或 None）
-        if call_args.args:
-            ctx = call_args.args[0]
-        else:
-            ctx = call_args.kwargs.get("dynamic_context")
-        assert ctx is None or isinstance(ctx, dict)
-
-    def test_chat_injects_speakers_info_on_first_speaker(self, mock_handler):
-        """首次说话人识别时, speakers_info 应被收集"""
+    def test_speaker_change_triggers_re_inject(self, mock_handler):
+        """说话人变化时, _build_speakers_info 应被再次调用。"""
         self._setup_mock_handler_with_llm(mock_handler)
-        mock_handler.memory = MagicMock()
-        mock_handler.loop = MagicMock()
+        mock_handler._build_speakers_info = MagicMock(return_value="当前说话人:X")
 
-        mock_handler.dialogue = MagicMock()
-        mock_handler.dialogue.get_llm_dialogue_with_memory = MagicMock(return_value=[])
-        mock_handler.dialogue.put = MagicMock()
-
-        mock_handler._build_speakers_info = MagicMock(return_value="当前说话人：张三")
-
-        mock_future = MagicMock()
-        mock_future.result.return_value = "用户喜欢音乐"
-        with patch.object(
-            mock_handler, "_resolve_current_speaker", return_value="张三", create=True
-        ):
-            with patch(
-                "core.connection.asyncio.run_coroutine_threadsafe",
-                return_value=mock_future,
-            ):
-                with patch.object(
-                    mock_handler.prompt_manager,
-                    "collect_dynamic_context",
-                    return_value={
-                        "current_time": "15:30",
-                        "speakers_info": "当前说话人：张三",
-                    },
-                ) as mock_collect:
-                    try:
-                        mock_handler.chat("hello", depth=1)
-                    except Exception:
-                        pass
-
-        # 验证 last_speaker_for_system 已更新
+        mock_handler.current_speaker = "张三"
+        try:
+            mock_handler.chat("hi", depth=1)
+        except Exception as e:
+            pytest.fail(f"chat() 第 1 次调用抛异常: {e!r}")
         assert mock_handler.last_speaker_for_system == "张三"
-        # 验证 speakers_info 被传给 collect_dynamic_context
-        call_kwargs = mock_collect.call_args.kwargs
-        assert call_kwargs.get("speakers_info") is not None
+
+        mock_handler.current_speaker = "李四"
+        try:
+            mock_handler.chat("hi", depth=1)
+        except Exception as e:
+            pytest.fail(f"chat() 第 2 次调用抛异常: {e!r}")
+        assert mock_handler.last_speaker_for_system == "李四"
+
+        assert mock_handler._build_speakers_info.call_count == 2, (
+            "说话人变化时 _build_speakers_info 应再次调用"
+        )
+
+    def test_same_speaker_skips_re_inject(self, mock_handler):
+        """同一说话人连续 chat, _build_speakers_info 只调用一次。"""
+        self._setup_mock_handler_with_llm(mock_handler)
+        mock_handler.current_speaker = "张三"
+        mock_handler._build_speakers_info = MagicMock(return_value="当前说话人:张三")
+
+        try:
+            mock_handler.chat("hi 1", depth=1)
+            mock_handler.chat("hi 2", depth=1)
+        except Exception as e:
+            pytest.fail(f"chat() 抛异常: {e!r}")
+
+        mock_handler._build_speakers_info.assert_called_once()
+        assert mock_handler.last_speaker_for_system == "张三"

@@ -160,7 +160,6 @@ class ConnectionHandler:
         self.asr_audio_queue = queue.Queue()
         self.current_speaker = None  # 存储当前说话人
         self.introduced_speakers = set()  # 已"首次引入"的说话人，控制只在首轮带名字
-        self.system_introduced_speakers = set()  # 已在 system 注入过身份的说话人，控制 system 身份只首轮出现
         # speakers_info 去重状态（KV cache 静态前缀优化引入）：仅在说话人变化时注入
         self.last_speaker_for_system: Optional[str] = None
 
@@ -194,8 +193,8 @@ class ConnectionHandler:
         # 标记连接是否来自MQTT
         self.conn_from_mqtt_gateway = False
 
-        # 初始化提示词管理器
-        self.prompt_manager = PromptManager(self.config, self.logger)
+        # 初始化提示词管理器（注入 conn_ref 以便 collect_dynamic_context 能动态读取 client_ip）
+        self.prompt_manager = PromptManager(self.config, self.logger, conn_ref=self)
 
         # 初始化通话状态
         self.calling = False
@@ -657,12 +656,9 @@ class ConnectionHandler:
 
     def _init_prompt_enhancement(self):
 
-        # 更新上下文信息
-        self.prompt_manager.update_context_info(self, self.client_ip)
         enhanced_prompt = self.prompt_manager.build_enhanced_prompt(
             self.config["prompt"],
             self.device_id,
-            self.client_ip,
             emoji_enabled=(self.features or {}).get("emoji", True),
         )
         if enhanced_prompt:
@@ -1099,21 +1095,24 @@ class ConnectionHandler:
                 )
                 memory_str = future.result()
 
-            # 解析当前说话人（_resolve_current_speaker 是预留接口, 未实现时 fallback 到 current_speaker 属性）
-            try:
-                current_speaker = getattr(
-                    self, "_resolve_current_speaker", lambda: None
-                )()
-            except Exception as e:
-                self.logger.bind(tag=TAG).warning(f"解析说话人失败: {e}")
-                current_speaker = None
+            # 解析当前说话人（直读 self.current_speaker，由 handle/* 在收到 ASR/意图时赋值）
+            # 防御性 getattr: 支持 __new__ 跳过 __init__ 的测试 fixture / 自定义子类
+            current_speaker = (getattr(self, "current_speaker", None) or "").strip()
 
             # speakers_info 去重: 仅在说话人变化时注入(KV cache 静态前缀优化 §4)
             speakers_info = None
             if current_speaker and current_speaker != "未知说话人":
                 if current_speaker != self.last_speaker_for_system:
                     try:
-                        voiceprint_config = getattr(self, "voiceprint_config", {}) or {}
+                        # 修复: 真实声纹 roster 在 self.voiceprint_provider.speakers, 不在 self.voiceprint_config
+                        # (后者从未被赋值; _initialize_voiceprint 仅写 self.voiceprint_provider, line 776)
+                        voiceprint_provider = getattr(self, "voiceprint_provider", None)
+                        if voiceprint_provider is not None:
+                            voiceprint_config = {
+                                "speakers": getattr(voiceprint_provider, "speakers", []) or []
+                            }
+                        else:
+                            voiceprint_config = self.config.get("voiceprint", {}) or {}
                         speakers_info = self._build_speakers_info(
                             current_speaker, voiceprint_config
                         )

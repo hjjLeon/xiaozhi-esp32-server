@@ -64,6 +64,7 @@ def _build_mock_handler(sample_config):
     handler.client_ip = "127.0.0.1"
     handler.memory = None
     handler.last_speaker_for_system = None
+    handler.current_speaker = None  # C1 修复后 chat() 直读此属性, 跳过 __init__ 的 mock 必须显式设
     handler.dialogue = Dialogue()
     handler.dialogue.update_system_message("STATIC_SYSTEM_PROMPT_CONTENT")
     handler.intent_type = "function_call"
@@ -101,14 +102,12 @@ class TestKVCacheOptimizationEndToEnd:
 
         # 模拟 5 条用户消息
         # 注意: chat() 是同步方法, 不使用 async for
-        # create=True: _resolve_current_speaker 是预留接口,当前不存在
-        with patch.object(handler, "_resolve_current_speaker", return_value=None, create=True):
-            for i in range(5):
-                handler.dialogue.put(Message(role="user", content=f"消息 {i}"))
-                try:
-                    handler.chat(f"消息 {i}")
-                except Exception:
-                    pass
+        for i in range(5):
+            handler.dialogue.put(Message(role="user", content=f"消息 {i}"))
+            try:
+                handler.chat(f"消息 {i}")
+            except Exception as e:
+                pytest.fail(f"chat() 在第 {i} 轮抛异常: {e!r}")
 
         # 验证所有 system 消息内容相同
         system_contents = []
@@ -143,12 +142,11 @@ class TestKVCacheOptimizationEndToEnd:
         handler.llm.response_with_functions = MagicMock(side_effect=capture)
         handler.llm.response = MagicMock(side_effect=capture)
 
-        with patch.object(handler, "_resolve_current_speaker", return_value=None, create=True):
-            for i in range(5):
-                try:
-                    handler.chat(f"消息 {i}")
-                except Exception:
-                    pass
+        for i in range(5):
+            try:
+                handler.chat(f"消息 {i}")
+            except Exception as e:
+                pytest.fail(f"chat() 在第 {i} 轮抛异常: {e!r}")
 
         assert len(captured_system_contents) >= 2
         # 所有 system 内容字节完全相同 → KV cache 静态前缀命中
@@ -177,22 +175,21 @@ class TestKVCacheOptimizationEndToEnd:
         ctx1 = {"current_time": "10:00", "memory": "用户喜欢古典音乐"}
         ctx2 = {"current_time": "14:30", "memory": "用户最近在学Python"}
 
-        with patch.object(handler, "_resolve_current_speaker", return_value=None, create=True):
-            handler.dialogue.put(Message(role="user", content="帮我推荐首歌"))
-            with patch.object(handler.prompt_manager, "collect_dynamic_context",
-                              return_value=ctx1):
-                try:
-                    handler.chat("帮我推荐首歌")
-                except Exception:
-                    pass
+        handler.dialogue.put(Message(role="user", content="帮我推荐首歌"))
+        with patch.object(handler.prompt_manager, "collect_dynamic_context",
+                          return_value=ctx1):
+            try:
+                handler.chat("帮我推荐首歌")
+            except Exception as e:
+                pytest.fail(f"chat() 第 1 次调用抛异常: {e!r}")
 
-            handler.dialogue.put(Message(role="user", content="再推荐一首"))
-            with patch.object(handler.prompt_manager, "collect_dynamic_context",
-                              return_value=ctx2):
-                try:
-                    handler.chat("再推荐一首")
-                except Exception:
-                    pass
+        handler.dialogue.put(Message(role="user", content="再推荐一首"))
+        with patch.object(handler.prompt_manager, "collect_dynamic_context",
+                          return_value=ctx2):
+            try:
+                handler.chat("再推荐一首")
+            except Exception as e:
+                pytest.fail(f"chat() 第 2 次调用抛异常: {e!r}")
 
         # 至少有 2 个 LLM 调用
         assert len(captured_dialogues) >= 2
