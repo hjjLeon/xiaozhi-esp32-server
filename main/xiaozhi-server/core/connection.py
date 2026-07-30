@@ -1099,29 +1099,65 @@ class ConnectionHandler:
                 )
                 memory_str = future.result()
 
-            # 仅在该说话人首次出现时把身份注入 system，之后靠对话历史首轮保留，
-            # 避免每轮在 system 重复出现名字诱导模型反复称呼
-            speaker_for_system = None
-            cs = (self.current_speaker or "").strip()
-            if cs and cs != "未知说话人" and cs not in self.system_introduced_speakers:
-                self.system_introduced_speakers.add(cs)
-                speaker_for_system = cs
+            # 解析当前说话人（_resolve_current_speaker 是预留接口, 未实现时 fallback 到 current_speaker 属性）
+            try:
+                current_speaker = getattr(
+                    self, "_resolve_current_speaker", lambda: None
+                )()
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"解析说话人失败: {e}")
+                current_speaker = None
+
+            # speakers_info 去重: 仅在说话人变化时注入(KV cache 静态前缀优化 §4)
+            speakers_info = None
+            if current_speaker and current_speaker != "未知说话人":
+                if current_speaker != self.last_speaker_for_system:
+                    try:
+                        voiceprint_config = getattr(self, "voiceprint_config", {}) or {}
+                        speakers_info = self._build_speakers_info(
+                            current_speaker, voiceprint_config
+                        )
+                        self.last_speaker_for_system = current_speaker
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).warning(
+                            f"构建 speakers_info 失败: {e}"
+                        )
+
+            # 一次性收集 dynamic_context(KV cache 静态前缀优化 §3.6)
+            try:
+                dynamic_context = self.prompt_manager.collect_dynamic_context(
+                    device_id=self.device_id,
+                    memory_str=memory_str,
+                    speakers_info=speakers_info,
+                )
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"collect_dynamic_context 失败: {e}"
+                )
+                dynamic_context = None
+
+            # 使用新签名构造 dialogue（仅传 dynamic_context dict）
+            try:
+                dialogue = self.dialogue.get_llm_dialogue_with_memory(
+                    dynamic_context
+                )
+            except Exception as e:
+                self.logger.bind(tag=TAG).error(
+                    f"get_llm_dialogue_with_memory 失败: {e}"
+                )
+                dialogue = self.dialogue.get_llm_dialogue_with_memory(None)
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    dialogue,
                     functions=functions,
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    dialogue,
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
