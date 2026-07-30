@@ -20,7 +20,7 @@ from core.utils.util import (
     check_asr_update,
     filter_sensitive_info,
 )
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from collections import deque
 from core.utils.modules_initialize import (
     initialize_modules,
@@ -161,6 +161,8 @@ class ConnectionHandler:
         self.current_speaker = None  # 存储当前说话人
         self.introduced_speakers = set()  # 已"首次引入"的说话人，控制只在首轮带名字
         self.system_introduced_speakers = set()  # 已在 system 注入过身份的说话人，控制 system 身份只首轮出现
+        # speakers_info 去重状态（KV cache 静态前缀优化引入）：仅在说话人变化时注入
+        self.last_speaker_for_system: Optional[str] = None
 
         # llm相关变量
         self.dialogue = Dialogue()
@@ -1519,9 +1521,41 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.logger.bind(tag=TAG).debug(f"清除服务端讲话状态")
 
+    def _build_speakers_info(
+        self, current_speaker: str, voiceprint_config: Optional[dict] = None
+    ) -> str:
+        """构建 speakers_info 字符串（纯函数化,不依赖 Dialogue 状态）。
+
+        格式:
+            当前说话人：<current_speaker>
+            - <name1>：<description1>
+            - <name2>：<description2>
+
+        Args:
+            current_speaker: 当前说话人姓名
+            voiceprint_config: 声纹配置 dict,key "speakers" 为
+                "id,name,description" 格式的字符串列表
+        """
+        if voiceprint_config is None:
+            voiceprint_config = {}
+        speakers = voiceprint_config.get("speakers", []) or []
+        lines = [f"当前说话人:{current_speaker}"]
+        for speaker_str in speakers:
+            try:
+                parts = speaker_str.split(",", 2)
+                if len(parts) >= 2:
+                    name = parts[1].strip()
+                    description = parts[2].strip() if len(parts) >= 3 else ""
+                    lines.append(f"- {name}:{description}")
+            except Exception:
+                continue
+        return "\n".join(lines)
+
     async def close(self, ws=None):
         """资源清理方法"""
         try:
+            # 清理 last_speaker_for_system 去重状态（KV cache 静态前缀优化）
+            self.last_speaker_for_system = None
             # 清理 VAD 连接资源
             if (
                     hasattr(self, "vad")
